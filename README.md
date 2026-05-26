@@ -26,15 +26,19 @@ result = GlenoidMorphology.measure(
   humerus_mask: numo_bit_3d_optional,  # optional, used to orient the glenoid-facing side AND crop the surface to the glenoid region
   affine:       voxel_to_mm_4x4,       # 4x4 voxel→mm transform (from the NIfTI header)
   side:         :right,                # :left or :right; inferred if omitted
+  method:       :pico,                 # :pico (default, inferior-2/3 reference circle, Baudi 2005) or :full_circle (legacy)
   glenoid_window_mm: 30.0,             # crop radius around humerus when humerus_mask given (default 30 mm)
   largest_component: true              # drop disconnected blobs in the scapula mask before extracting surface (default true)
 )
 
-result.bone_loss_percent   # => e.g. 18.4
-result.fitted_circle       # => { center: [x,y,z], radius_mm: 23.8, normal: [...] }
-result.en_face_plane       # => { a:, b:, c:, d: }  (ax + by + cz = d in mm)
-result.defect_arc          # => { start_angle:, end_angle:, arc_length_mm: }
-result.confidence          # => 0.0..1.0 (low if fit residual is large)
+result.bone_loss_percent          # => e.g. 4.2 (over the inferior-2/3 Pico sector)
+result.fitted_circle              # => { center: [x,y,z], radius_mm: 12.5, normal: [...] }
+result.pico_circle                # => same shape; nil when method: :full_circle
+result.legacy_bone_loss_percent   # => full-circle area integral, for back-comparison
+result.method                     # => :pico or :full_circle
+result.en_face_plane              # => { a:, b:, c:, d: }  (ax + by + cz = d in mm)
+result.defect_arc                 # => { start_angle:, end_angle:, arc_length_mm: }
+result.confidence                 # => 0.0..1.0 (low if fit residual is large)
 ```
 
 See `doc/method.md` for the full algorithm.
@@ -76,8 +80,12 @@ neural-network involvement:
    (Andrew's chain hull + Kasa algebraic LSQ with iterative reweighting).
 6. **Walk the fitted circle** and check, at each angle, whether bone
    exists near the rim radius. Contiguous "no-bone" runs are the defect arc.
-7. **Bone loss** = circular segment area / disc area
-   = `(theta - sin(theta)) / (2 * pi)`.
+7. **Bone loss** = polar-Jacobian area integral of "missing bone inside the
+   fitted circle", over either the inferior-2/3 sector (`:pico`, the v0.3+
+   default) or the full circle (`:full_circle`, legacy). The Pico method
+   correctly recognises the healthy pear-shaped glenoid as having near-zero
+   loss; the full-circle method flags the pear-vs-circle shape mismatch as
+   ~10-50% loss depending on how elongated the rim is.
 
 [paper]: https://arxiv.org/abs/2511.14083
 

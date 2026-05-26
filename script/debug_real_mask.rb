@@ -197,14 +197,15 @@ end
 log ""
 log "=== stage 9: end-to-end measure ==="
 
-def run_one(label, mask, humerus:, affine:, side:)
+def run_one(label, mask, humerus:, affine:, side:, method: :pico)
   t0 = Time.now
   result = GlenoidMorphology.measure(
     scapula_mask: mask, humerus_mask: humerus,
-    affine: affine, side: side, seed: 12345
+    affine: affine, side: side, seed: 12345, method: method
   )
   elapsed = (Time.now - t0).round(2)
-  warn "  [#{label}]  blp=#{result.bone_loss_percent.round(2)}%  r=#{result.fitted_circle[:radius_mm].round(2)}mm  conf=#{result.confidence.round(3)}  (#{elapsed}s)"
+  legacy = result.legacy_bone_loss_percent ? result.legacy_bone_loss_percent.round(2) : "n/a"
+  warn "  [#{label}]  method=#{method}  blp=#{result.bone_loss_percent.round(2)}%  legacy=#{legacy}%  r=#{result.fitted_circle[:radius_mm].round(2)}mm  conf=#{result.confidence.round(3)}  (#{elapsed}s)"
   result
 rescue => e
   warn "  [#{label}]  FAILED: #{e.class}: #{e.message}"
@@ -212,10 +213,32 @@ rescue => e
   nil
 end
 
-run_one "raw_scapula  / no humerus",    scap,    humerus: nil,       affine: affine, side: :left
-run_one "raw_scapula  / hum_union",     scap,    humerus: hum_union, affine: affine, side: :left
-run_one "largestCC    / no humerus",    cc_mask, humerus: nil,       affine: affine, side: :left
-run_one "largestCC    / hum_union",     cc_mask, humerus: hum_union, affine: affine, side: :left
+# Legacy (v0.2.0) full-circle behaviour, for comparison.
+run_one "largestCC    / hum_union     ", cc_mask, humerus: hum_union,         affine: affine, side: :left, method: :full_circle
+run_one "largestCC    / hum_left_only ", cc_mask, humerus: masks["humerus_left"], affine: affine, side: :left, method: :full_circle
+# v0.3.0 default: Pico inferior-2/3 method.
+run_one "raw_scapula  / no humerus    ", scap,    humerus: nil,                affine: affine, side: :left, method: :pico
+run_one "raw_scapula  / hum_union     ", scap,    humerus: hum_union,          affine: affine, side: :left, method: :pico
+run_one "largestCC    / no humerus    ", cc_mask, humerus: nil,                affine: affine, side: :left, method: :pico
+run_one "largestCC    / hum_union     ", cc_mask, humerus: hum_union,          affine: affine, side: :left, method: :pico
+run_one "largestCC    / hum_left_only ", cc_mask, humerus: masks["humerus_left"], affine: affine, side: :left, method: :pico
+
+warn ""
+warn "=== stage 9b: vary glenoid_window_mm with Pico ==="
+warn "(diagnostic: Pico radius is sensitive to the proximity-crop window because"
+warn " the real seg's rim isn't a clean inferior-arc circle. Larger windows pull"
+warn " in supraspinatus-fossa noise that drives the radius back up but also adds loss.)"
+[30.0, 50.0, 60.0].each do |w|
+  t0 = Time.now
+  result = GlenoidMorphology.measure(
+    scapula_mask: cc_mask, humerus_mask: masks["humerus_left"],
+    affine: affine, side: :left, seed: 12345, method: :pico,
+    glenoid_window_mm: w
+  )
+  warn "  [Pico, w=#{w}mm]  blp=#{result.bone_loss_percent.round(2)}%  legacy=#{result.legacy_bone_loss_percent.round(2)}%  r=#{result.fitted_circle[:radius_mm].round(2)}mm  (#{(Time.now - t0).round(1)}s)"
+rescue => e
+  warn "  [Pico, w=#{w}mm]  FAILED: #{e.message}"
+end
 
 log ""
 log "done"

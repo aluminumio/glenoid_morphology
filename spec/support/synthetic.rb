@@ -105,6 +105,74 @@ module Synthetic
     mask
   end
 
+  # Pear-shaped glenoid: a CIRCLE of radius `r` for the inferior 2/3 of the
+  # rim, with the superior 1/3 narrowed inward by `taper_mm` to model the
+  # natural pear shape of a healthy human glenoid.
+  #
+  # The in-plane basis (u, v) is picked by `in_plane_basis(plane_normal)`.
+  # The SI axis is `v`: positive v = superior, negative v = inferior. The
+  # superior narrowing kicks in for points with v > r/3 (i.e. the superior
+  # third), and tapers the rim from radius `r` (at v = r/3) down to
+  # `r - taper_mm` (at v = r, the superior pole).
+  #
+  # If you fit a circle to ALL the rim points of this shape you'll get a
+  # radius somewhere between (r - taper) and r — that's the legacy failure
+  # mode. The Pico method, by restricting to the inferior 240°, recovers
+  # the true r.
+  def pear_glenoid_mask(grid: GRID,
+                        r: 12.0,
+                        taper_mm: 4.0,
+                        thickness: GLENOID_THICKNESS,
+                        center: GLENOID_CENTER,
+                        plane_normal: [0.0, 0.0, 1.0],
+                        defect_angle_deg: 0.0,
+                        defect_at_inferior: true)
+    mask = Numo::Bit.zeros(grid, grid, grid)
+    n = normalise(plane_normal)
+    u_ax, v_ax = in_plane_basis(n)
+    taper_start_v = r / 3.0
+    taper_span    = r - taper_start_v # the v-range over which we narrow
+
+    grid.times do |i|
+      grid.times do |j|
+        grid.times do |k|
+          dx = i - center[0]; dy = j - center[1]; dz = k - center[2]
+          along_n = dx * n[0] + dy * n[1] + dz * n[2]
+          next if along_n.abs > (thickness / 2.0)
+
+          in_plane_x = dx - along_n * n[0]
+          in_plane_y = dy - along_n * n[1]
+          in_plane_z = dz - along_n * n[2]
+          u_pos = in_plane_x * u_ax[0] + in_plane_y * u_ax[1] + in_plane_z * u_ax[2]
+          v_pos = in_plane_x * v_ax[0] + in_plane_y * v_ax[1] + in_plane_z * v_ax[2]
+
+          # Below the superior taper start, the shape is the circle of radius r.
+          rad2 = u_pos * u_pos + v_pos * v_pos
+          next if rad2 > r * r
+
+          # Above the taper start, narrow the |u| extent linearly toward the
+          # superior pole.
+          if v_pos > taper_start_v
+            t = ((v_pos - taper_start_v) / taper_span).clamp(0.0, 1.0)
+            u_limit = Math.sqrt([r * r - v_pos * v_pos, 0.0].max) - taper_mm * t
+            next if u_pos.abs > [u_limit, 0.0].max
+          end
+
+          # Optional chord defect at the inferior pole (or superior pole).
+          # The chord is at distance r * cos(angle/2) from the centre.
+          if defect_angle_deg.positive?
+            cut_distance = r * Math.cos(defect_angle_deg * Math::PI / 360.0)
+            along = defect_at_inferior ? -v_pos : v_pos
+            next if along > cut_distance
+          end
+
+          mask[i, j, k] = 1
+        end
+      end
+    end
+    mask
+  end
+
   # Synthetic humerus mask: a sphere sitting in the +plane_normal direction
   # past the glenoid disc. Used to disambiguate which side of the disc faces
   # the joint. Returned as a Numo::Bit of the same shape.

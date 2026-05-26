@@ -119,6 +119,7 @@ elliptical) glenoid outline.
 
 | key                          | default | meaning                                                                                |
 |------------------------------|---------|----------------------------------------------------------------------------------------|
+| `method`                     | `:pico` | `:pico` (inferior-2/3 reference circle, Baudi 2005) or `:full_circle` (legacy)         |
 | `humerus_mask`               | nil     | optional Numo::Bit; enables glenoid-facing direction inference + proximity surface crop |
 | `glenoid_window_mm`          | 30.0    | when `humerus_mask` is given, keep only surface voxels within `d_min + window_mm` of the humerus centroid |
 | `largest_component`          | true    | strip disconnected blobs in the scapula mask before extracting surface                |
@@ -143,24 +144,85 @@ data and the bone-loss percent should not be trusted.
   fine; the heavy lifting (PCA, RANSAC, mask sampling) is the bottleneck.
 - The convex hull is implemented on plain Ruby tuples (small N).
 
-## Limitations vs. the paper
+## Pico inferior-2/3 method (v0.3.0 default)
 
-- We use Kasa for circle fitting (the paper notes Pratt as an alternative
-  for sub-degree-arc inputs). Kasa is sufficient for the wide arcs we see
-  in real glenoids (rim covers >270°).
-- We assume the defect is a single contiguous chord-segment removal. The
-  algorithm reports only the LARGEST defect arc.
-- Real glenoid measurements may also use the inferior-circle method (paired
-  inferior-quadrant circle vs. full-circle). That isn't implemented yet —
-  if needed it's a small addition built on the same circle-fit primitives.
+The healthy glenoid is pear-shaped (~30 mm superior-inferior × ~18 mm
+anterior-posterior). The lower 2/3 of the rim is circular; the superior
+1/3 narrows. Fitting a single circle to the WHOLE rim averages the SI
+and AP dimensions and then the area-integral bone-loss metric flags the
+ellipse-vs-circle shape difference as bone loss (~55% on a healthy
+glenoid). The Pico method fits the reference circle to only the
+inferior-2/3 of the rim — which is genuinely circular — then measures
+bone loss only over that same 240° sector.
 
-## Known issue: bone-loss over-estimation on real masks (v0.2.0)
+Citation: Baudi P, Righi P, Bolognesi D, Campochiaro G, Rebuzzi M,
+Matino G, Catani F. *How to identify and calculate glenoid bone deficit*.
+Chir Organi Mov. 2005; 90(2):145-152. (Variants are also published as
+"Pico" / "best-fit inferior circle" in Sugaya 2003 and subsequent
+literature.)
 
-On a real `scapula_left` mask from `shoulder_segmenter`, the radius now
-fits the glenoid (~13 mm) but `bone_loss_percent` still reports ~55% for
-an apparently healthy glenoid. Root cause: the real glenoid is pear/
-elliptical-shaped (~30 mm SI × ~18 mm AP), and the best-fit circle picks
-a radius between those dimensions, so the area-integral metric flags
-shape-vs-circle mismatch as bone-loss. The fix here is the Pico
-inferior-2/3 circle method (fit only the inferior arc) — deferred to a
-follow-up.
+Pipeline additions on top of steps 1-6 above:
+
+1. Compute the inferior direction in the en-face plane's 2D basis. The
+   world-space inferior unit vector is `-superior`, derived from the
+   NIfTI affine: pick the affine column most aligned with world +Z (the
+   image axis closest to anatomical superior), negate it. For a standard
+   RAS+ affine this is `[0, 0, -1]`.
+2. Project the 3D inferior unit onto the en-face plane (subtract the
+   normal component) and re-normalise; express in `(u, v)` basis. That
+   gives a 2D unit vector pointing inferior in projected coordinates.
+3. Filter rim points to those within `±120°` of the inferior pole
+   (measuring from the projected inferior direction around the rim
+   centroid). Sanity check: if fewer than 20% of rim points survive,
+   raise; the SI direction was probably wrong.
+4. Fit the **Pico reference circle** to just those inferior-2/3 points
+   using the same RANSAC + Kasa + IRLS pass as the full-rim circle.
+5. Walk the full 360° of the Pico circle as before, but in the
+   area-integral sum at the end of step 7 above, sum and divide only
+   over the inferior-2/3 bins. The natural pear-narrowing on the
+   superior third is then NOT scored as bone loss.
+
+### Edge case: SI direction is nearly parallel to the plane normal
+
+For an unusual scanner orientation (glenoid facing straight up/down),
+the projection of world-inferior onto the en-face plane is degenerate.
+In that case we fall back to the **longest principal axis of the 2D rim
+point cloud** as the SI proxy, sign-disambiguated to point toward the
+majority of the rim points (i.e. away from the narrowed superior tip).
+A warning is emitted.
+
+### `method: :full_circle` (legacy)
+
+The pre-Pico algorithm is still available via the `method: :full_circle`
+kwarg. The struct field `legacy_bone_loss_percent` always carries the
+full-circle bone-loss for back-comparison, regardless of which method was
+selected as the primary.
+
+## Known issue: real-mask bone-loss is sensitive to seg quality (v0.3.0)
+
+On the `shoulder_segmenter` `scapula_left` mask we instrumented with
+`script/debug_real_mask.rb` (`tmp/segmentation_run_appendicular/labels.nii.gz`),
+the Pico method drops bone-loss from the full-circle ~60% but settles
+around 40-50% rather than the expected ~0-10% for a healthy shoulder.
+
+Drilling in: the SI direction projection from the affine is correct
+(`world_inferior ≈ [0.1, 0.13, -0.99]`, projection onto the en-face
+plane is non-degenerate, no fallback fires), and the rim point cloud has
+the expected ~30mm × 18mm pear-shaped extent in projected coordinates.
+The problem is upstream: the convex-hull rim has only ~25 points and
+substantial gaps on one side of the inferior arc. With a small subset of
+points, the inferior-2/3 fit collapses onto a tight curve and reports
+`r ≈ 6-8 mm` instead of the clinical ~12-13 mm. Sweeping the proximity
+crop window pushes the radius back to ~12 mm but at the cost of pulling
+non-glenoid scapular surface into the rim.
+
+Likely follow-ups:
+- Radial smoothing or morphological closing on the mask before surface
+  extraction.
+- Denser rim sampling (per-angle max-radius after the convex hull, with
+  outlier rejection on the chord side).
+- Cross-validate the segmentation against a CT viewer; the mask may
+  genuinely be truncated.
+
+This is upstream of the Pico geometry; the Pico method works correctly
+on the synthetic pear glenoid (`spec/pico_method_spec.rb`).

@@ -15,6 +15,13 @@ RSpec.describe "GlenoidMorphology.measure (end-to-end)" do
 
   def measure_mask(mask, humerus: nil, **opts)
     humerus ||= Synthetic.humerus_mask_for
+    # These specs verify the full-circle chord-segment math. The Pico method
+    # (the v0.3+ default) intentionally measures bone loss only over the
+    # inferior-2/3 sector of a clinically-derived reference circle, which is
+    # the right thing for real anatomy but not what these synthetic
+    # axis-aligned chord-defect discs test. New Pico specs live in
+    # pico_method_spec.rb.
+    opts = { method: :full_circle }.merge(opts)
     GlenoidMorphology.measure(
       scapula_mask: mask,
       humerus_mask: humerus,
