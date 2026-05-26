@@ -23,9 +23,11 @@ require "glenoid_morphology"
 
 result = GlenoidMorphology.measure(
   scapula_mask: numo_bit_3d,           # Numo::Bit shape [D, H, W]
-  humerus_mask: numo_bit_3d_optional,  # optional, used to orient the glenoid-facing side
+  humerus_mask: numo_bit_3d_optional,  # optional, used to orient the glenoid-facing side AND crop the surface to the glenoid region
   affine:       voxel_to_mm_4x4,       # 4x4 voxel→mm transform (from the NIfTI header)
-  side:         :right                 # :left or :right; inferred if omitted
+  side:         :right,                # :left or :right; inferred if omitted
+  glenoid_window_mm: 30.0,             # crop radius around humerus when humerus_mask given (default 30 mm)
+  largest_component: true              # drop disconnected blobs in the scapula mask before extracting surface (default true)
 )
 
 result.bone_loss_percent   # => e.g. 18.4

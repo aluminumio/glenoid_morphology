@@ -19,6 +19,14 @@ module GlenoidMorphology
       ransac_threshold_mm: 1.5,
       rim_radial_tolerance_mm: 1.0,
       defect_bins: 360,
+      # Largest connected component preprocessing. Real segmentations have
+      # spurious blobs; disabling for fully synthetic single-blob masks.
+      largest_component: true,
+      # When a humerus mask is supplied, restrict scapula surface voxels to
+      # those within `d_min + glenoid_window_mm` of the humerus centroid.
+      # ~30 mm cleanly isolates the glenoid surface from the rest of the
+      # scapula at typical CT resolution (real glenoid diameter is ~25 mm).
+      glenoid_window_mm: 30.0,
       seed: nil
     }.freeze
 
@@ -27,12 +35,36 @@ module GlenoidMorphology
     def call(scapula_mask:, affine:, **opts)
       opts = DEFAULT_OPTS.merge(opts)
 
+      # 0. Strip spurious blobs: keep only the largest connected component.
+      #    Skipped if disabled (synthetic single-blob test masks).
+      working_mask = opts[:largest_component] ? SurfaceExtraction.largest_component(scapula_mask) : scapula_mask
+
       # 1. Surface voxels of the scapula (in voxel index space).
-      surface_idx = SurfaceExtraction.surface_voxels(scapula_mask)
+      surface_idx = SurfaceExtraction.surface_voxels(working_mask)
       raise Error, "scapula mask has no surface voxels" if surface_idx.shape[0].zero?
 
-      # 2. Filter to the glenoid-facing side.
-      facing_dir = infer_glenoid_direction(scapula_mask,
+      # 2a. If we have a humerus mask, crop surface voxels to the region near
+      #     the humerus centroid — this is the glenoid surface. Without this
+      #     step the whole scapular blade dominates the PCA plane fit.
+      if opts[:humerus_mask]
+        hum_idx = SurfaceExtraction.indices_of_true(opts[:humerus_mask].cast_to(Numo::Bit))
+        if hum_idx.shape[0].positive?
+          hum_centroid_vox = Numo::DFloat.cast(hum_idx).mean(axis: 0)
+          hum_centroid_mm  = Affine.voxels_to_mm(hum_centroid_vox.reshape(1, 3), affine)[0, true]
+          surface_mm_all   = Affine.voxels_to_mm(surface_idx, affine)
+          cropped = SurfaceExtraction.filter_near_anchor(
+            surface_idx,
+            voxels_mm: surface_mm_all,
+            anchor_mm: hum_centroid_mm,
+            window_mm: opts[:glenoid_window_mm]
+          )
+          surface_idx = cropped if cropped.shape[0] >= 30
+        end
+      end
+
+      # 2b. Filter to the glenoid-facing side (residual cleanup; mostly
+      #     redundant when the proximity crop above ran).
+      facing_dir = infer_glenoid_direction(working_mask,
                                            surface_idx: surface_idx,
                                            humerus_mask: opts[:humerus_mask],
                                            side: opts[:side])
@@ -85,7 +117,7 @@ module GlenoidMorphology
         circle: circle,
         projector: projector,
         affine: affine,
-        scapula_mask: scapula_mask,
+        scapula_mask: working_mask,
         bins: opts[:defect_bins],
         tolerance_mm: opts[:rim_radial_tolerance_mm]
       )
@@ -178,26 +210,34 @@ module GlenoidMorphology
 
     # Walk the fitted circle in the rim-plane 2D frame. For each angular bin,
     # cast a ray FROM the centre OUTWARD past the fitted rim, and record the
-    # maximum radius at which bone is still present. A bin is "intact" iff
-    # max-bone-radius >= fitted_radius - tolerance; otherwise it's a defect bin
-    # (bone is recessed inward of the rim, which is exactly how glenoid bone
-    # loss manifests).
+    # maximum radius at which bone is still present.
+    #
+    # Bone-loss is computed as an *area integral*:
+    #   loss = (1/bins) * sum_b (1 - (max_bone_r_b / circle.radius)^2)
+    # which is the polar-coordinate Jacobian formulation of
+    # (circle_area - bone_area_inside_circle) / circle_area. This is correct
+    # both for clean chord defects (max_bone_r = 0 across the defect arc → same
+    # answer as the segment formula) AND for real-glenoid masks where bone
+    # is non-circular but doesn't have a wedge-shaped hole (the gentle
+    # ellipse-vs-circle mismatch contributes only a few percent loss, not 95%).
+    #
+    # `occupancy` and the largest-gap angular span are still computed (for the
+    # `defect_arc` field of the result), using `tolerance_mm` as the radial
+    # tolerance for "intact at this angle". Pure no-bone bins ALWAYS count as
+    # defect regardless of tolerance.
     def walk_circle_for_defect(circle:, projector:, affine:, scapula_mask:,
                                bins:, tolerance_mm:)
       occupancy = Numo::Bit.zeros(bins)
+      max_bone_r_arr = Array.new(bins, -1.0)
       affine_n = Affine.to_narray(affine)
       inv = Numo::Linalg.inv(affine_n)
       shape = scapula_mask.shape
 
-      # Sample radii from 0 out to radius + tolerance, step ~ half a voxel.
       voxel_mm = Affine.voxel_spacing_mm(affine_n)
       step = [voxel_mm * 0.5, 0.25].max
       r_max = circle.radius + tolerance_mm
       n_samples = (r_max / step).ceil + 1
 
-      # Through-plane offsets: a few samples ALONG the plane normal centred on
-      # the in-plane sample point. Compensates for tilt between the fitted
-      # plane and the true disc plane.
       normal = projector.normal
       n_through = 5
       through_spacing = voxel_mm
@@ -233,15 +273,26 @@ module GlenoidMorphology
           end
           max_bone_r = r_sample if hit
         end
+        max_bone_r_arr[b] = max_bone_r
         occupancy[b] = 1 if max_bone_r >= circle.radius - tolerance_mm
       end
 
+      # Area-based loss fraction.
+      r = circle.radius
+      area_total = Math::PI * (r ** 2)
+      loss_sum = 0.0
+      max_bone_r_arr.each do |mbr|
+        eff = (mbr.negative? ? 0.0 : [mbr, r].min)
+        loss_sum += 1.0 - (eff / r) ** 2
+      end
+      fraction = loss_sum / bins
+      fraction = 0.0 if fraction.negative?
+      fraction = 1.0 if fraction > 1.0
+      area_lost = fraction * area_total
+
       gap = DefectArc.largest_gap(occupancy, bins)
       angular_span = gap[:span] * (2.0 * Math::PI / bins)
-      arc_length = angular_span * circle.radius
-      area_lost = 0.5 * (circle.radius**2) * (angular_span - Math.sin(angular_span))
-      area_total = Math::PI * (circle.radius**2)
-      fraction = area_total.positive? ? (area_lost / area_total) : 0.0
+      arc_length = angular_span * r
 
       start_angle = gap[:start] * (2.0 * Math::PI / bins)
       end_angle   = gap[:end_excl] * (2.0 * Math::PI / bins)

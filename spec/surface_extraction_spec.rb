@@ -38,4 +38,46 @@ RSpec.describe GlenoidMorphology::SurfaceExtraction do
     expect(facing_ks.all? { |k| k > centroid_k - 0.001 }).to be(true)
     expect(facing.shape[0]).to be < surf.shape[0]
   end
+
+  describe ".largest_component" do
+    it "keeps a single blob unchanged" do
+      mask = Numo::Bit.zeros(10, 10, 10)
+      mask[2..7, 2..7, 2..7] = 1
+      cc = described_class.largest_component(mask)
+      expect(cc.count_true).to eq(mask.count_true)
+    end
+
+    it "drops disconnected spurious blobs" do
+      mask = Numo::Bit.zeros(20, 20, 20)
+      # Big blob (the "scapula")
+      mask[5..14, 5..14, 5..14] = 1
+      # Two stray blobs (the "acromion tip" + "noise")
+      mask[18..19, 18..19, 18..19] = 1
+      mask[0..1, 0..1, 0..1] = 1
+
+      cc = described_class.largest_component(mask)
+      expect(cc[10, 10, 10]).to eq(1)
+      expect(cc[18, 18, 18]).to eq(0)
+      expect(cc[0, 0, 0]).to eq(0)
+      expect(cc.count_true).to eq(10 * 10 * 10)
+    end
+
+    it "returns an all-zero mask for empty input" do
+      mask = Numo::Bit.zeros(5, 5, 5)
+      cc = described_class.largest_component(mask)
+      expect(cc.count_true).to eq(0)
+    end
+  end
+
+  describe ".filter_near_anchor" do
+    it "keeps voxels within d_min + window of the anchor and drops the rest" do
+      idx = Numo::Int64[[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 100]]
+      mm  = Numo::DFloat.cast(idx) # 1 mm spacing
+      anchor = Numo::DFloat[0.0, 0.0, 0.0]
+      kept = described_class.filter_near_anchor(idx, voxels_mm: mm, anchor_mm: anchor, window_mm: 1.5)
+      # d_min = 0; window = 1.5 → keep voxels at distance <= 1.5
+      # That's [0,0,0] (d=0), [0,0,1] (d=1). Not [0,0,2] (d=2), not [0,0,100].
+      expect(kept.shape[0]).to eq(2)
+    end
+  end
 end

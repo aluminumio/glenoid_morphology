@@ -105,4 +105,47 @@ RSpec.describe "GlenoidMorphology.measure (end-to-end)" do
           "diff=#{(a - b).round(3)}\n"
     expect((a - b).abs).to be < TOLERANCE_PCT
   end
+
+  context "real-mask regression (synthetic fixtures)" do
+    # Real segmentation masks routinely violate the synthetic "single thin disc"
+    # assumption. These two specs reproduce the failure modes I instrumented
+    # against the appendicular-task labels.nii.gz (scapula_left from
+    # shoulder_segmenter), where the unfixed pipeline returned
+    # bone_loss_percent ~= 96% and radius_mm ~= 138 on a healthy glenoid.
+
+    it "ignores a disconnected spurious blob far from the glenoid" do
+      # An intact glenoid disc + a spurious blob the segmenter would label as
+      # 'scapula_left' (an acromion tip or labelling-noise cluster).
+      mask = Synthetic.intact_glenoid_mask
+      # Add a 4x4x4 spurious blob in the opposite corner.
+      mask[10..13, 10..13, 10..13] = 1
+
+      result = measure_mask(mask)
+      # Without largest-component preprocessing this fit gets dragged across
+      # the volume by the spurious blob; with it the answer should be the
+      # same as the spurious-blob-free case.
+      expect(result.fitted_circle[:radius_mm]).to be_within(2.0).of(Synthetic::GLENOID_RADIUS)
+      expect(result.bone_loss_percent).to be < TOLERANCE_PCT
+    end
+
+    it "isolates the glenoid surface when a humerus mask is supplied" do
+      # Real CT segmentation masks fuse the glenoid disc with the rest of
+      # the scapula. We simulate that: an intact disc connected via a thin
+      # neck to a thick scapular-blade slab.
+      mask = Synthetic.intact_glenoid_mask
+      # Scapular-blade slab.
+      mask[20..79, 20..79, 0..40] = 1
+      # A neck connecting the slab top (k=40) to the disc bottom (k=78).
+      mask[45..54, 45..54, 40..78] = 1
+
+      humerus = Synthetic.humerus_mask_for
+      with_crop = measure_mask(mask, humerus: humerus, glenoid_window_mm: 25.0)
+
+      # Without the proximity crop the fit would be dragged across the whole
+      # scapula (the slab dwarfs the disc). With humerus-proximity cropping
+      # we recover the disc radius.
+      expect(with_crop.fitted_circle[:radius_mm]).to be_within(6.0).of(Synthetic::GLENOID_RADIUS)
+      expect(with_crop.bone_loss_percent).to be < 35.0
+    end
+  end
 end

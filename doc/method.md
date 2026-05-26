@@ -98,26 +98,35 @@ The largest contiguous run of "no-bone" bins is the principal defect arc.
 
 ### 8. Bone-loss percent
 
-The lost area is the **circular segment** between the defect chord and the
-arc:
+The lost area is a polar-coordinate area integral of "missing bone inside
+the fitted circle":
 
 ```
-A_segment = 0.5 * r^2 * (theta - sin(theta))
-bone_loss_fraction = A_segment / (pi * r^2)
-                   = (theta - sin(theta)) / (2 * pi)
+bone_loss_fraction = (1 / N_bins) * sum_b (1 - (max_bone_r_b / r)^2)
 ```
 
-where `theta` is the angular span of the defect in radians.
+where `max_bone_r_b` is the largest radius at which bone is present along
+the ray at angular bin `b`, and `r` is the fitted circle radius. This is
+the polar-Jacobian form of `(circle_area - bone_area_inside_circle) / circle_area`.
+
+For a clean chord defect (synthetic case) this reduces to the standard
+circular-segment formula `(theta - sin(theta)) / (2*pi)` where `theta` is
+the angular span of the chord. For a real glenoid the integral is also
+robust to small mismatches between the fitted circle and the (mildly
+elliptical) glenoid outline.
 
 ## Tunable knobs (`GlenoidMorphology::Measure::DEFAULT_OPTS`)
 
-| key                          | default | meaning                                           |
-|------------------------------|---------|---------------------------------------------------|
-| `ransac_iterations`          | 200     | RANSAC iterations for circle fit                  |
-| `ransac_threshold_mm`        | 1.5     | mm tolerance for RANSAC inliers                   |
-| `rim_radial_tolerance_mm`    | 1.0     | mm tolerance for "on-rim" vs "defect" in step 7   |
-| `defect_bins`                | 360     | angular bin count (1° per bin)                    |
-| `seed`                       | nil     | RNG seed for reproducible RANSAC                  |
+| key                          | default | meaning                                                                                |
+|------------------------------|---------|----------------------------------------------------------------------------------------|
+| `humerus_mask`               | nil     | optional Numo::Bit; enables glenoid-facing direction inference + proximity surface crop |
+| `glenoid_window_mm`          | 30.0    | when `humerus_mask` is given, keep only surface voxels within `d_min + window_mm` of the humerus centroid |
+| `largest_component`          | true    | strip disconnected blobs in the scapula mask before extracting surface                |
+| `ransac_iterations`          | 200     | RANSAC iterations for circle fit                                                       |
+| `ransac_threshold_mm`        | 1.5     | mm tolerance for RANSAC inliers                                                        |
+| `rim_radial_tolerance_mm`    | 1.0     | mm tolerance for "on-rim" occupancy bit in step 7                                      |
+| `defect_bins`                | 360     | angular bin count (1° per bin)                                                         |
+| `seed`                       | nil     | RNG seed for reproducible RANSAC                                                       |
 
 ## Confidence
 
@@ -144,3 +153,14 @@ data and the bone-loss percent should not be trusted.
 - Real glenoid measurements may also use the inferior-circle method (paired
   inferior-quadrant circle vs. full-circle). That isn't implemented yet —
   if needed it's a small addition built on the same circle-fit primitives.
+
+## Known issue: bone-loss over-estimation on real masks (v0.2.0)
+
+On a real `scapula_left` mask from `shoulder_segmenter`, the radius now
+fits the glenoid (~13 mm) but `bone_loss_percent` still reports ~55% for
+an apparently healthy glenoid. Root cause: the real glenoid is pear/
+elliptical-shaped (~30 mm SI × ~18 mm AP), and the best-fit circle picks
+a radius between those dimensions, so the area-integral metric flags
+shape-vs-circle mismatch as bone-loss. The fix here is the Pico
+inferior-2/3 circle method (fit only the inferior arc) — deferred to a
+follow-up.
